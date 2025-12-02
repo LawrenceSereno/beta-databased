@@ -1,0 +1,1873 @@
+/* ============================================
+   BestBuddies Pet Grooming - Booking Flow
+   ============================================ */
+
+let bookingData = {
+  petType: null,
+  packageId: null,
+  groomerId: null,
+  groomerName: '',
+  date: null,
+  time: null,
+  ownerName: '',
+  contactNumber: '',
+  ownerAddress: '',
+  petName: '',
+  petBreed: '',
+  petAge: '',
+  petWeight: '',
+  medicalNotes: '',
+  vaccinationNotes: '',
+  addOns: [],
+  bookingNotes: '',
+  saveProfile: true,
+  singleServices: []
+};
+
+let currentStep = 1;
+const totalSteps = 4;
+const SINGLE_SERVICE_PACKAGE_ID = 'single-service';
+const SINGLE_SERVICE_OPTIONS = window.SINGLE_SERVICE_PRICING || {};
+
+function normalizeWeightValue(value = '') {
+  return value.replace(/-/g, '–');
+}
+
+// Convert age string to months for validation
+function getAgeInMonths(ageStr) {
+  if (!ageStr) return 999; // Default to high number if not set
+  const lower = ageStr.toLowerCase();
+  if (lower.includes('month')) {
+    const match = lower.match(/\d+/);
+    return match ? parseInt(match[0], 10) : 999;
+  }
+  if (lower.includes('year')) {
+    const match = lower.match(/\d+/);
+    return match ? parseInt(match[0], 10) * 12 : 999;
+  }
+  if (lower.includes('less')) return 0; // "Less than 1 month"
+  return 999;
+}
+
+// Filter age options based on package selection
+function updateAgeDropdownOptions() {
+  const petAgeSelect = document.getElementById('petAge');
+  if (!petAgeSelect) return;
+  
+  const currentValue = petAgeSelect.value;
+  const allOptions = [
+    { value: '', text: 'Select age...' },
+    { value: 'Less than 1 month', text: 'Less than 1 month' },
+    { value: '1 month', text: '1 month' },
+    { value: '2 months', text: '2 months' },
+    { value: '3 months', text: '3 months' },
+    { value: '4 months', text: '4 months' },
+    { value: '5 months', text: '5 months' },
+    { value: '6 months', text: '6 months' },
+    { value: '7 months', text: '7 months' },
+    { value: '8 months', text: '8 months' },
+    { value: '9 months', text: '9 months' },
+    { value: '10 months', text: '10 months' },
+    { value: '11 months', text: '11 months' },
+    { value: '1 year', text: '1 year' },
+    { value: '2 years', text: '2 years' },
+    { value: '3 years', text: '3 years' },
+    { value: '4 years', text: '4 years' },
+    { value: '5 years', text: '5 years' },
+    { value: '6 years', text: '6 years' },
+    { value: '7 years', text: '7 years' },
+    { value: '8 years', text: '8 years' },
+    { value: '9 years', text: '9 years' },
+    { value: '10 years', text: '10 years' },
+    { value: '11 years', text: '11 years' },
+    { value: '12 years', text: '12 years' },
+    { value: '13 years', text: '13 years' },
+    { value: '14 years', text: '14 years' },
+    { value: '15 years', text: '15 years' },
+    { value: '16+ years', text: '16+ years' }
+  ];
+  
+  // For single service: show all ages (including 5 months and below)
+  // For other packages: show only 6 months and above
+  let visibleOptions = allOptions;
+  if (bookingData.packageId && bookingData.packageId !== SINGLE_SERVICE_PACKAGE_ID) {
+    visibleOptions = allOptions.filter(opt => !opt.value || getAgeInMonths(opt.value) >= 6);
+  }
+  
+  // Rebuild the select options
+  petAgeSelect.innerHTML = '';
+  visibleOptions.forEach(opt => {
+    const optElement = document.createElement('option');
+    optElement.value = opt.value;
+    optElement.textContent = opt.text;
+    petAgeSelect.appendChild(optElement);
+  });
+  
+  // Restore previous selection if it's still valid
+  if (currentValue && visibleOptions.some(opt => opt.value === currentValue)) {
+    petAgeSelect.value = currentValue;
+  } else {
+    petAgeSelect.value = '';
+  }
+}
+
+// Initialize booking page
+async function initBooking() {
+  try {
+    await ensurePackagesLoaded(); // important to avoid Promise pending in computeBookingCost / updateSummary
+
+    // Restore booking data and step from sessionStorage if returning from auth
+    const savedBookingData = sessionStorage.getItem('bookingData');
+    const savedStep = sessionStorage.getItem('bookingStep');
+
+    // NEW: check for edit/cancel markers placed by customer dashboard
+    const editingBookingId = sessionStorage.getItem('editingBookingId');
+    const bookingCancelId = sessionStorage.getItem('bookingCancelId');
+
+    let targetStep = 1; // Default to step 1
+
+    if (savedBookingData) {
+      try {
+        const restored = JSON.parse(savedBookingData);
+        // Merge restored data with current bookingData
+        bookingData = { ...bookingData, ...restored };
+        sessionStorage.removeItem('bookingData');
+      } catch (e) {
+        console.error('Failed to restore booking data:', e);
+      }
+    }
+
+    // If an edit marker exists, prefer that and jump to review step
+    if (editingBookingId) {
+      bookingData.editingBookingId = editingBookingId;
+      targetStep = 4;
+      // preserve merged bookingData for restore and remove marker
+      sessionStorage.removeItem('editingBookingId');
+    }
+
+    // If a cancel marker exists, set cancel id and jump to review step
+    if (bookingCancelId) {
+      bookingData.bookingCancelId = bookingCancelId;
+      targetStep = 4;
+      sessionStorage.removeItem('bookingCancelId');
+    }
+
+    // Restore form fields from bookingData so the UI is prefilled
+    try {
+      restoreBookingFormData(bookingData);
+    } catch (e) {
+      console.warn('restoreBookingFormData failed', e);
+    }
+
+    if (savedStep) {
+      try {
+        // savedStep overrides default unless edit/cancel already set targetStep
+        if (!editingBookingId && !bookingCancelId) {
+          targetStep = parseInt(savedStep, 10);
+        }
+        sessionStorage.removeItem('bookingStep');
+      } catch (e) {
+        console.error('Failed to restore booking step:', e);
+      }
+    }
+
+    // Get current user (don't fail if this errors - allow browsing without login)
+    let user = null;
+    try {
+      if (typeof getCurrentUser === 'function') {
+        user = await getCurrentUser();
+      }
+    } catch (error) {
+      console.warn('Could not get current user (user may not be logged in):', error);
+      // Continue without user - allow browsing
+    }
+
+    // Pre-fill owner name with account name if logged in
+    const ownerNameInput = document.getElementById('ownerName');
+    if (ownerNameInput && user) {
+      ownerNameInput.value = user.name;
+      bookingData.ownerName = user.name;
+    }
+
+    // Initialize to target step (restored or default step 1)
+    showStep(targetStep);
+
+    // Setup calendar time picker
+    setupCalendarTimePicker();
+
+    // Setup event listeners
+    setupBookingListeners();
+
+    // Attempt to load saved profile silently if logged in
+    if (user) {
+      try {
+        const warningInfo = await getCustomerWarningInfo(user.id);
+        if (warningInfo?.isBanned) {
+          alert('Your account is temporarily banned. Please check your customer dashboard for instructions on how to lift the ban.');
+          redirect('customer-dashboard.html');
+          return;
+        }
+        const savedProfile = await getCustomerProfile(user.id);
+        if (savedProfile) {
+          applyProfileToForm(savedProfile);
+        }
+      } catch (error) {
+        console.warn('Could not load user profile:', error);
+        // Continue without profile
+      }
+    }
+
+    // Load packages (after listeners are set up)
+    loadPackages();
+    renderSingleServiceConfigurator();
+  } catch (error) {
+    console.error('Error initializing booking:', error);
+    // Don't show alert for permission errors - user might not be logged in yet
+    if (error.message && error.message.includes('Permission denied')) {
+      console.warn('Permission denied - user may need to update Firebase security rules. See FIX_BOOKING_PERMISSION_ERROR.md');
+      // Continue anyway - might work with localStorage fallback
+    } else {
+      alert('Error loading booking page. Please refresh and try again.');
+    }
+  }
+}
+
+if (typeof window.ensurePackagesLoaded === 'undefined') {
+  window.ensurePackagesLoaded = async function () {
+    try {
+      if (typeof getPackages === 'function') {
+        const pk = await getPackages();
+        window.packagesList = Array.isArray(pk) ? pk : (window.packagesList || []);
+      } else {
+        window.packagesList = window.packagesList || [];
+      }
+    } catch (e) {
+      console.warn('ensurePackagesLoaded failed', e);
+      window.packagesList = window.packagesList || [];
+    }
+  };
+}
+
+if (typeof window.restoreBookingFormData === 'undefined') {
+  window.restoreBookingFormData = function (data) {
+    try {
+      if (!data) return;
+      const map = {
+        ownerName: 'ownerName',
+        contactNumber: 'contactNumber',
+        ownerAddress: 'ownerAddress',
+        petName: 'petName',
+        petBreed: 'petBreed',
+        petAge: 'petAge',
+        petWeight: 'petWeight',
+        medicalNotes: 'medicalNotes',
+        vaccinationNotes: 'vaccinationNotes',
+        bookingNotes: 'bookingNotes'
+      };
+      Object.keys(map).forEach(k => {
+        const el = document.getElementById(map[k]);
+        if (!el || typeof data[k] === 'undefined' || data[k] === null) return;
+        if ('value' in el) el.value = data[k];
+        else el.textContent = data[k];
+      });
+    } catch (err) { console.warn('restoreBookingFormData failed', err); }
+  };
+}
+
+if (typeof window.selectGroomingCut === 'undefined') {
+  window.selectGroomingCut = function(cutName, ev) {
+    try {
+      if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+      const notesEl = document.getElementById('bookingNotes');
+      if (notesEl) {
+        const original = notesEl.value || '';
+        const cleaned = original.split('\n').filter(l => !/^Preferred cut:/i.test(l)).join('\n').trim();
+        notesEl.value = `Preferred cut: ${cutName}` + (cleaned ? '\n' + cleaned : '');
+      }
+    } catch (e) { console.warn('selectGroomingCut guard failed', e); }
+  };
+}
+
+/* ============================================
+   BestBuddies Pet Grooming - Booking Flow
+   ============================================ */
+
+let bookingData = {
+  petType: null,
+  packageId: null,
+  groomerId: null,
+  groomerName: '',
+  date: null,
+  time: null,
+  ownerName: '',
+  contactNumber: '',
+  ownerAddress: '',
+  petName: '',
+  petBreed: '',
+  petAge: '',
+  petWeight: '',
+  medicalNotes: '',
+  vaccinationNotes: '',
+  addOns: [],
+  bookingNotes: '',
+  saveProfile: true,
+  singleServices: []
+};
+
+let currentStep = 1;
+const totalSteps = 4;
+const SINGLE_SERVICE_PACKAGE_ID = 'single-service';
+const SINGLE_SERVICE_OPTIONS = window.SINGLE_SERVICE_PRICING || {};
+
+function normalizeWeightValue(value = '') {
+  return value.replace(/-/g, '–');
+}
+
+// Convert age string to months for validation
+function getAgeInMonths(ageStr) {
+  if (!ageStr) return 999; // Default to high number if not set
+  const lower = ageStr.toLowerCase();
+  if (lower.includes('month')) {
+    const match = lower.match(/\d+/);
+    return match ? parseInt(match[0], 10) : 999;
+  }
+  if (lower.includes('year')) {
+    const match = lower.match(/\d+/);
+    return match ? parseInt(match[0], 10) * 12 : 999;
+  }
+  if (lower.includes('less')) return 0; // "Less than 1 month"
+  return 999;
+}
+
+// Filter age options based on package selection
+function updateAgeDropdownOptions() {
+  const petAgeSelect = document.getElementById('petAge');
+  if (!petAgeSelect) return;
+  
+  const currentValue = petAgeSelect.value;
+  const allOptions = [
+    { value: '', text: 'Select age...' },
+    { value: 'Less than 1 month', text: 'Less than 1 month' },
+    { value: '1 month', text: '1 month' },
+    { value: '2 months', text: '2 months' },
+    { value: '3 months', text: '3 months' },
+    { value: '4 months', text: '4 months' },
+    { value: '5 months', text: '5 months' },
+    { value: '6 months', text: '6 months' },
+    { value: '7 months', text: '7 months' },
+    { value: '8 months', text: '8 months' },
+    { value: '9 months', text: '9 months' },
+    { value: '10 months', text: '10 months' },
+    { value: '11 months', text: '11 months' },
+    { value: '1 year', text: '1 year' },
+    { value: '2 years', text: '2 years' },
+    { value: '3 years', text: '3 years' },
+    { value: '4 years', text: '4 years' },
+    { value: '5 years', text: '5 years' },
+    { value: '6 years', text: '6 years' },
+    { value: '7 years', text: '7 years' },
+    { value: '8 years', text: '8 years' },
+    { value: '9 years', text: '9 years' },
+    { value: '10 years', text: '10 years' },
+    { value: '11 years', text: '11 years' },
+    { value: '12 years', text: '12 years' },
+    { value: '13 years', text: '13 years' },
+    { value: '14 years', text: '14 years' },
+    { value: '15 years', text: '15 years' },
+    { value: '16+ years', text: '16+ years' }
+  ];
+  
+  // For single service: show all ages (including 5 months and below)
+  // For other packages: show only 6 months and above
+  let visibleOptions = allOptions;
+  if (bookingData.packageId && bookingData.packageId !== SINGLE_SERVICE_PACKAGE_ID) {
+    visibleOptions = allOptions.filter(opt => !opt.value || getAgeInMonths(opt.value) >= 6);
+  }
+  
+  // Rebuild the select options
+  petAgeSelect.innerHTML = '';
+  visibleOptions.forEach(opt => {
+    const optElement = document.createElement('option');
+    optElement.value = opt.value;
+    optElement.textContent = opt.text;
+    petAgeSelect.appendChild(optElement);
+  });
+  
+  // Restore previous selection if it's still valid
+  if (currentValue && visibleOptions.some(opt => opt.value === currentValue)) {
+    petAgeSelect.value = currentValue;
+  } else {
+    petAgeSelect.value = '';
+  }
+}
+
+// Initialize booking page
+async function initBooking() {
+  try {
+    await ensurePackagesLoaded(); // important to avoid Promise pending in computeBookingCost / updateSummary
+
+    // Restore booking data and step from sessionStorage if returning from auth
+    const savedBookingData = sessionStorage.getItem('bookingData');
+    const savedStep = sessionStorage.getItem('bookingStep');
+
+    // NEW: check for edit/cancel markers placed by customer dashboard
+    const editingBookingId = sessionStorage.getItem('editingBookingId');
+    const bookingCancelId = sessionStorage.getItem('bookingCancelId');
+
+    let targetStep = 1; // Default to step 1
+
+    if (savedBookingData) {
+      try {
+        const restored = JSON.parse(savedBookingData);
+        // Merge restored data with current bookingData
+        bookingData = { ...bookingData, ...restored };
+        sessionStorage.removeItem('bookingData');
+      } catch (e) {
+        console.error('Failed to restore booking data:', e);
+      }
+    }
+
+    // If an edit marker exists, prefer that and jump to review step
+    if (editingBookingId) {
+      bookingData.editingBookingId = editingBookingId;
+      targetStep = 4;
+      // preserve merged bookingData for restore and remove marker
+      sessionStorage.removeItem('editingBookingId');
+    }
+
+    // If a cancel marker exists, set cancel id and jump to review step
+    if (bookingCancelId) {
+      bookingData.bookingCancelId = bookingCancelId;
+      targetStep = 4;
+      sessionStorage.removeItem('bookingCancelId');
+    }
+
+    // Restore form fields from bookingData so the UI is prefilled
+    try {
+      restoreBookingFormData(bookingData);
+    } catch (e) {
+      console.warn('restoreBookingFormData failed', e);
+    }
+
+    if (savedStep) {
+      try {
+        // savedStep overrides default unless edit/cancel already set targetStep
+        if (!editingBookingId && !bookingCancelId) {
+          targetStep = parseInt(savedStep, 10);
+        }
+        sessionStorage.removeItem('bookingStep');
+      } catch (e) {
+        console.error('Failed to restore booking step:', e);
+      }
+    }
+
+    // Get current user (don't fail if this errors - allow browsing without login)
+    let user = null;
+    try {
+      if (typeof getCurrentUser === 'function') {
+        user = await getCurrentUser();
+      }
+    } catch (error) {
+      console.warn('Could not get current user (user may not be logged in):', error);
+      // Continue without user - allow browsing
+    }
+
+    // Pre-fill owner name with account name if logged in
+    const ownerNameInput = document.getElementById('ownerName');
+    if (ownerNameInput && user) {
+      ownerNameInput.value = user.name;
+      bookingData.ownerName = user.name;
+    }
+
+    // Initialize to target step (restored or default step 1)
+    showStep(targetStep);
+
+    // Setup calendar time picker
+    setupCalendarTimePicker();
+
+    // Setup event listeners
+    setupBookingListeners();
+
+    // Attempt to load saved profile silently if logged in
+    if (user) {
+      try {
+        const warningInfo = await getCustomerWarningInfo(user.id);
+        if (warningInfo?.isBanned) {
+          alert('Your account is temporarily banned. Please check your customer dashboard for instructions on how to lift the ban.');
+          redirect('customer-dashboard.html');
+          return;
+        }
+        const savedProfile = await getCustomerProfile(user.id);
+        if (savedProfile) {
+          applyProfileToForm(savedProfile);
+        }
+      } catch (error) {
+        console.warn('Could not load user profile:', error);
+        // Continue without profile
+      }
+    }
+
+    // Load packages (after listeners are set up)
+    loadPackages();
+    renderSingleServiceConfigurator();
+  } catch (error) {
+    console.error('Error initializing booking:', error);
+    // Don't show alert for permission errors - user might not be logged in yet
+    if (error.message && error.message.includes('Permission denied')) {
+      console.warn('Permission denied - user may need to update Firebase security rules. See FIX_BOOKING_PERMISSION_ERROR.md');
+      // Continue anyway - might work with localStorage fallback
+    } else {
+      alert('Error loading booking page. Please refresh and try again.');
+    }
+  }
+}
+
+// Ensure packages are loaded before any compute/summary
+async function ensurePackagesLoaded() {
+  try {
+    if (typeof getPackages === 'function') {
+      const pk = await getPackages();
+      window.packagesList = Array.isArray(pk) ? pk : (window.packagesList || []);
+    } else {
+      window.packagesList = window.packagesList || [];
+    }
+  } catch (e) {
+    console.warn('ensurePackagesLoaded failed', e);
+    window.packagesList = window.packagesList || [];
+  }
+}
+
+// Guarded restoreBookingFormData — define only if missing
+if (typeof window.restoreBookingFormData === 'undefined') {
+  window.restoreBookingFormData = function (data) {
+    try {
+      if (!data) return;
+      const map = {
+        ownerName: 'ownerName',
+        contactNumber: 'contactNumber',
+        ownerAddress: 'ownerAddress',
+        petName: 'petName',
+        petBreed: 'petBreed',
+        petAge: 'petAge',
+        petWeight: 'petWeight',
+        medicalNotes: 'medicalNotes',
+        vaccinationNotes: 'vaccinationNotes',
+        bookingNotes: 'bookingNotes'
+      };
+      Object.keys(map).forEach(k => {
+        try {
+          const el = document.getElementById(map[k]);
+          if (!el || typeof data[k] === 'undefined' || data[k] === null) return;
+          if ('value' in el) el.value = data[k];
+          else el.textContent = data[k];
+        } catch (inner) { /* ignore per-field */ }
+      });
+    } catch (err) { console.warn('restoreBookingFormData failed', err); }
+  };
+}
+
+// Fair groomer assignment: pick the least-loaded groomer for date/time
+async function assignFairGroomer(date, time) {
+  try {
+    const groomers = (typeof getGroomers === 'function') ? await getGroomers() : (window.groomersList || []);
+    if (!Array.isArray(groomers) || groomers.length === 0) return null;
+    const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+    const counts = groomers.map(g => ({
+      groomer: g,
+      count: all.filter(b => b.groomerId === g.id && b.date === date && b.time === time && !/cancelled/i.test(b.status || '')).length
+    }));
+    counts.sort((a, b) => a.count - b.count);
+    return counts[0]?.groomer || null;
+  } catch (e) {
+    console.warn('assignFairGroomer error', e);
+    return null;
+  }
+}
+
+// Adjust slot availability map (fallback localStorage)
+async function adjustSlotCount(date, time, delta) {
+  if (!date || !time || typeof delta !== 'number') return;
+  try {
+    if (typeof updateSlotAvailability === 'function') {
+      await updateSlotAvailability(date, time, delta);
+      return;
+    }
+    const key = 'slotAvailability';
+    const map = JSON.parse(localStorage.getItem(key) || '{}');
+    const id = `${date}@@${time}`;
+    const defaultSlots = 4;
+    map[id] = (typeof map[id] === 'number' ? map[id] : defaultSlots) + delta;
+    if (map[id] < 0) map[id] = 0;
+    localStorage.setItem(key, JSON.stringify(map));
+  } catch (e) {
+    console.warn('adjustSlotCount failed', e);
+  }
+}
+
+// Make selectGroomingCut defensive (prevent form submit)
+function selectGroomingCut(cutName, ev) {
+  try {
+    if (ev) {
+      if (typeof ev.preventDefault === 'function') ev.preventDefault();
+      if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+      if (typeof ev.stopPropagation === 'function') ev.stopPropagation();
+    }
+    const hidden = document.getElementById('preferredCutInput');
+    if (hidden) hidden.value = cutName;
+    const notesEl = document.getElementById('bookingNotes');
+    if (notesEl) {
+      const original = notesEl.value || '';
+      const cleaned = original.split('\n').filter(l => !/^Preferred cut:/i.test(l)).join('\n').trim();
+      notesEl.value = `Preferred cut: ${cutName}` + (cleaned ? '\n' + cleaned : '');
+    }
+    document.querySelectorAll('[data-cut]').forEach(btn => {
+      const match = btn.dataset && btn.dataset.cut === cutName;
+      btn.classList.toggle('selected-cut', match);
+      const parent = btn.closest('div');
+      if (parent) parent.classList.toggle('selected-cut-card', match);
+    });
+    window.selectGroomingCut = selectGroomingCut;
+  } catch (err) { console.warn('selectGroomingCut error', err); }
+}
+window.selectGroomingCut = selectGroomingCut;
+
+// Submit booking: defensive grooming assignment + slot adjustments (replace or merge into your submitBooking)
+async function submitBooking(event) {
+  try {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+
+    // validate last step
+    if (typeof validateStep === 'function' && !validateStep(4)) return;
+
+    // ensure user
+    if (typeof getCurrentUser !== 'function') {
+      alert('Authentication not ready. Please refresh.');
+      return;
+    }
+    const user = await getCurrentUser();
+    if (!user) {
+      alert('Please sign in to submit a booking.');
+      sessionStorage.setItem('bookingData', JSON.stringify(bookingData));
+      sessionStorage.setItem('bookingStep', '4');
+      window.location.href = 'signup.html?return=booking.html';
+      return;
+    }
+
+    // ensure packages loaded
+    await ensurePackagesLoaded();
+
+    // safe groomer assignment
+    let assignedGroomerId = bookingData.groomerId || null;
+    let assignedGroomerName = bookingData.groomerName || 'Assigned on site';
+    if (!assignedGroomerId && typeof assignFairGroomer === 'function') {
+      try {
+        const fair = await assignFairGroomer(bookingData.date, bookingData.time);
+        if (fair) { assignedGroomerId = fair.id; assignedGroomerName = fair.name || assignedGroomerName; }
+      } catch (e) { console.warn('assignFairGroomer failed', e); }
+    }
+
+    // compute cost safely
+    const costDetails = (typeof computeBookingCost === 'function')
+      ? computeBookingCost(bookingData.packageId, bookingData.petWeight, bookingData.addOns, bookingData.singleServices)
+      : { subtotal: 0, totalAmount: 0 };
+
+    // build booking object
+    const booking = {
+      id: generateId ? generateId() : ('bk_' + Date.now()),
+      shortId: (typeof generateBookingCode === 'function') ? generateBookingCode() : undefined,
+      userId: user.id,
+      petName: bookingData.petName || '',
+      petType: bookingData.petType || '',
+      packageName: bookingData.packageId || '',
+      packageId: bookingData.packageId || '',
+      date: bookingData.date,
+      time: bookingData.time,
+      phone: bookingData.contactNumber || '',
+      customerName: bookingData.ownerName || '',
+      groomerId: assignedGroomerId,
+      groomerName: assignedGroomerName,
+      addOns: bookingData.addOns ? bookingData.addOns.slice() : [],
+      bookingNotes: bookingData.bookingNotes || '',
+      singleServices: bookingData.singleServices ? bookingData.singleServices.slice() : [],
+      petWeight: bookingData.petWeight || '',
+      profile: {}, // set as needed
+      status: 'pending',
+      createdAt: Date.now(),
+      cost: costDetails,
+      totalPrice: costDetails?.subtotal || 0
+    };
+
+    // editing path: update and adjust slots if date/time changed
+    const editingId = bookingData.editingBookingId || sessionStorage.getItem('editingBookingId');
+    if (editingId) {
+      booking.id = editingId;
+      // fetch original booking
+      let original = null;
+      if (typeof getBookingById === 'function') original = await getBookingById(editingId);
+      else {
+        const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+        original = all.find(b => b.id === editingId) || null;
+      }
+      // update storage
+      if (typeof updateBooking === 'function') await updateBooking(booking);
+      else {
+        const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+        const idx = all.findIndex(b => b.id === editingId);
+        if (idx >= 0) all[idx] = booking; else all.push(booking);
+        if (typeof saveBookings === 'function') await saveBookings(all);
+        else localStorage.setItem('bookings', JSON.stringify(all));
+      }
+      // adjust slots if date/time changed
+      if (original && (original.date !== booking.date || original.time !== booking.time)) {
+        await adjustSlotCount(original.date, original.time, +1);
+        await adjustSlotCount(booking.date, booking.time, -1);
+      }
+      sessionStorage.removeItem('editingBookingId');
+      sessionStorage.setItem('lastBooking', JSON.stringify(booking));
+      if (typeof redirect === 'function') redirect('booking-success.html'); else window.location.href = 'booking-success.html';
+      return;
+    }
+
+    // create new booking
+    if (typeof createBooking === 'function') await createBooking(booking);
+    else {
+      const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+      all.push(booking);
+      if (typeof saveBookings === 'function') await saveBookings(all);
+      else localStorage.setItem('bookings', JSON.stringify(all));
+    }
+    // decrement slot
+    await adjustSlotCount(booking.date, booking.time, -1);
+    sessionStorage.setItem('lastBooking', JSON.stringify(booking));
+    if (typeof redirect === 'function') redirect('booking-success.html'); else window.location.href = 'booking-success.html';
+  } catch (err) {
+    console.error('submitBooking failed', err);
+    alert('An error occurred while submitting the booking. See console.');
+  }
+}
+window.submitBooking = submitBooking;
+
+// Ensure packages are available before doing summary/validation
+async function ensurePackagesLoaded() {
+  try {
+    if (typeof getPackages === 'function') {
+      const pk = await getPackages();
+      window.packagesList = Array.isArray(pk) ? pk : (window.packagesList || []);
+    } else {
+      window.packagesList = window.packagesList || [];
+    }
+  } catch (e) {
+    console.warn('ensurePackagesLoaded failed', e);
+    window.packagesList = window.packagesList || [];
+  }
+}
+
+// Guarded restoreBookingFormData — define only if missing
+if (typeof window.restoreBookingFormData === 'undefined') {
+  window.restoreBookingFormData = function (data) {
+    try {
+      if (!data) return;
+      const map = {
+        ownerName: 'ownerName',
+        contactNumber: 'contactNumber',
+        ownerAddress: 'ownerAddress',
+        petName: 'petName',
+        petBreed: 'petBreed',
+        petAge: 'petAge',
+        petWeight: 'petWeight',
+        medicalNotes: 'medicalNotes',
+        vaccinationNotes: 'vaccinationNotes',
+        bookingNotes: 'bookingNotes'
+      };
+      Object.keys(map).forEach(k => {
+        try {
+          const el = document.getElementById(map[k]);
+          if (!el || typeof data[k] === 'undefined' || data[k] === null) return;
+          if ('value' in el) el.value = data[k];
+          else el.textContent = data[k];
+        } catch (inner) { /* ignore per-field */ }
+      });
+    } catch (err) { console.warn('restoreBookingFormData failed', err); }
+  };
+}
+
+// Fair groomer assignment: pick the least-loaded groomer for date/time
+async function assignFairGroomer(date, time) {
+  try {
+    const groomers = (typeof getGroomers === 'function') ? await getGroomers() : (window.groomersList || []);
+    if (!Array.isArray(groomers) || groomers.length === 0) return null;
+    const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+    const counts = groomers.map(g => ({
+      groomer: g,
+      count: all.filter(b => b.groomerId === g.id && b.date === date && b.time === time && !/cancelled/i.test(b.status || '')).length
+    }));
+    counts.sort((a, b) => a.count - b.count);
+    return counts[0]?.groomer || null;
+  } catch (e) {
+    console.warn('assignFairGroomer error', e);
+    return null;
+  }
+}
+
+// Adjust slot availability map (fallback localStorage)
+async function adjustSlotCount(date, time, delta) {
+  if (!date || !time || typeof delta !== 'number') return;
+  try {
+    if (typeof updateSlotAvailability === 'function') {
+      await updateSlotAvailability(date, time, delta);
+      return;
+    }
+    const key = 'slotAvailability';
+    const map = JSON.parse(localStorage.getItem(key) || '{}');
+    const id = `${date}@@${time}`;
+    const defaultSlots = 4;
+    map[id] = (typeof map[id] === 'number' ? map[id] : defaultSlots) + delta;
+    if (map[id] < 0) map[id] = 0;
+    localStorage.setItem(key, JSON.stringify(map));
+  } catch (e) {
+    console.warn('adjustSlotCount failed', e);
+  }
+}
+
+// Make selectGroomingCut defensive (prevent form submit)
+function selectGroomingCut(cutName, ev) {
+  try {
+    if (ev) {
+      if (typeof ev.preventDefault === 'function') ev.preventDefault();
+      if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+      if (typeof ev.stopPropagation === 'function') ev.stopPropagation();
+    }
+    const hidden = document.getElementById('preferredCutInput');
+    if (hidden) hidden.value = cutName;
+    const notesEl = document.getElementById('bookingNotes');
+    if (notesEl) {
+      const original = notesEl.value || '';
+      const cleaned = original.split('\n').filter(l => !/^Preferred cut:/i.test(l)).join('\n').trim();
+      notesEl.value = `Preferred cut: ${cutName}` + (cleaned ? '\n' + cleaned : '');
+    }
+    document.querySelectorAll('[data-cut]').forEach(btn => {
+      const match = btn.dataset && btn.dataset.cut === cutName;
+      btn.classList.toggle('selected-cut', match);
+      const parent = btn.closest('div');
+      if (parent) parent.classList.toggle('selected-cut-card', match);
+    });
+    window.selectGroomingCut = selectGroomingCut;
+  } catch (err) { console.warn('selectGroomingCut error', err); }
+}
+window.selectGroomingCut = selectGroomingCut;
+
+// Submit booking: defensive grooming assignment + slot adjustments (replace or merge into your submitBooking)
+async function submitBooking(event) {
+  try {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+
+    // validate last step
+    if (typeof validateStep === 'function' && !validateStep(4)) return;
+
+    // ensure user
+    if (typeof getCurrentUser !== 'function') {
+      alert('Authentication not ready. Please refresh.');
+      return;
+    }
+    const user = await getCurrentUser();
+    if (!user) {
+      alert('Please sign in to submit a booking.');
+      sessionStorage.setItem('bookingData', JSON.stringify(bookingData));
+      sessionStorage.setItem('bookingStep', '4');
+      window.location.href = 'signup.html?return=booking.html';
+      return;
+    }
+
+    // ensure packages loaded
+    await ensurePackagesLoaded();
+
+    // safe groomer assignment
+    let assignedGroomerId = bookingData.groomerId || null;
+    let assignedGroomerName = bookingData.groomerName || 'Assigned on site';
+    if (!assignedGroomerId && typeof assignFairGroomer === 'function') {
+      try {
+        const fair = await assignFairGroomer(bookingData.date, bookingData.time);
+        if (fair) { assignedGroomerId = fair.id; assignedGroomerName = fair.name || assignedGroomerName; }
+      } catch (e) { console.warn('assignFairGroomer failed', e); }
+    }
+
+    // compute cost safely
+    const costDetails = (typeof computeBookingCost === 'function')
+      ? computeBookingCost(bookingData.packageId, bookingData.petWeight, bookingData.addOns, bookingData.singleServices)
+      : { subtotal: 0, totalAmount: 0 };
+
+    // build booking object
+    const booking = {
+      id: generateId ? generateId() : ('bk_' + Date.now()),
+      shortId: (typeof generateBookingCode === 'function') ? generateBookingCode() : undefined,
+      userId: user.id,
+      petName: bookingData.petName || '',
+      petType: bookingData.petType || '',
+      packageName: bookingData.packageId || '',
+      packageId: bookingData.packageId || '',
+      date: bookingData.date,
+      time: bookingData.time,
+      phone: bookingData.contactNumber || '',
+      customerName: bookingData.ownerName || '',
+      groomerId: assignedGroomerId,
+      groomerName: assignedGroomerName,
+      addOns: bookingData.addOns ? bookingData.addOns.slice() : [],
+      bookingNotes: bookingData.bookingNotes || '',
+      singleServices: bookingData.singleServices ? bookingData.singleServices.slice() : [],
+      petWeight: bookingData.petWeight || '',
+      profile: {}, // set as needed
+      status: 'pending',
+      createdAt: Date.now(),
+      cost: costDetails,
+      totalPrice: costDetails?.subtotal || 0
+    };
+
+    // editing path: update and adjust slots if date/time changed
+    const editingId = bookingData.editingBookingId || sessionStorage.getItem('editingBookingId');
+    if (editingId) {
+      booking.id = editingId;
+      // fetch original booking
+      let original = null;
+      if (typeof getBookingById === 'function') original = await getBookingById(editingId);
+      else {
+        const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+        original = all.find(b => b.id === editingId) || null;
+      }
+      // update storage
+      if (typeof updateBooking === 'function') await updateBooking(booking);
+      else {
+        const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+        const idx = all.findIndex(b => b.id === editingId);
+        if (idx >= 0) all[idx] = booking; else all.push(booking);
+        if (typeof saveBookings === 'function') await saveBookings(all);
+        else localStorage.setItem('bookings', JSON.stringify(all));
+      }
+      // adjust slots if date/time changed
+      if (original && (original.date !== booking.date || original.time !== booking.time)) {
+        await adjustSlotCount(original.date, original.time, +1);
+        await adjustSlotCount(booking.date, booking.time, -1);
+      }
+      sessionStorage.removeItem('editingBookingId');
+      sessionStorage.setItem('lastBooking', JSON.stringify(booking));
+      if (typeof redirect === 'function') redirect('booking-success.html'); else window.location.href = 'booking-success.html';
+      return;
+    }
+
+    // create new booking
+    if (typeof createBooking === 'function') await createBooking(booking);
+    else {
+      const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+      all.push(booking);
+      if (typeof saveBookings === 'function') await saveBookings(all);
+      else localStorage.setItem('bookings', JSON.stringify(all));
+    }
+    // decrement slot
+    await adjustSlotCount(booking.date, booking.time, -1);
+    sessionStorage.setItem('lastBooking', JSON.stringify(booking));
+    if (typeof redirect === 'function') redirect('booking-success.html'); else window.location.href = 'booking-success.html';
+  } catch (err) {
+    console.error('submitBooking failed', err);
+    alert('An error occurred while submitting the booking. See console.');
+  }
+}
+window.submitBooking = submitBooking;
+
+// Ensure packages are available before doing summary/validation
+async function ensurePackagesLoaded() {
+  try {
+    if (typeof getPackages === 'function') {
+      const pk = await getPackages();
+      window.packagesList = Array.isArray(pk) ? pk : (window.packagesList || []);
+    } else {
+      window.packagesList = window.packagesList || [];
+    }
+  } catch (e) {
+    console.warn('ensurePackagesLoaded failed', e);
+    window.packagesList = window.packagesList || [];
+  }
+}
+
+// Guarded restoreBookingFormData — define only if missing
+if (typeof window.restoreBookingFormData === 'undefined') {
+  window.restoreBookingFormData = function (data) {
+    try {
+      if (!data) return;
+      const map = {
+        ownerName: 'ownerName',
+        contactNumber: 'contactNumber',
+        ownerAddress: 'ownerAddress',
+        petName: 'petName',
+        petBreed: 'petBreed',
+        petAge: 'petAge',
+        petWeight: 'petWeight',
+        medicalNotes: 'medicalNotes',
+        vaccinationNotes: 'vaccinationNotes',
+        bookingNotes: 'bookingNotes'
+      };
+      Object.keys(map).forEach(k => {
+        try {
+          const el = document.getElementById(map[k]);
+          if (!el || typeof data[k] === 'undefined' || data[k] === null) return;
+          if ('value' in el) el.value = data[k];
+          else el.textContent = data[k];
+        } catch (inner) { /* ignore per-field */ }
+      });
+    } catch (err) { console.warn('restoreBookingFormData failed', err); }
+  };
+}
+
+// Fair groomer assignment: pick the least-loaded groomer for date/time
+async function assignFairGroomer(date, time) {
+  try {
+    const groomers = (typeof getGroomers === 'function') ? await getGroomers() : (window.groomersList || []);
+    if (!Array.isArray(groomers) || groomers.length === 0) return null;
+    const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+    const counts = groomers.map(g => ({
+      groomer: g,
+      count: all.filter(b => b.groomerId === g.id && b.date === date && b.time === time && !/cancelled/i.test(b.status || '')).length
+    }));
+    counts.sort((a, b) => a.count - b.count);
+    return counts[0]?.groomer || null;
+  } catch (e) {
+    console.warn('assignFairGroomer error', e);
+    return null;
+  }
+}
+
+// Adjust slot availability map (fallback localStorage)
+async function adjustSlotCount(date, time, delta) {
+  if (!date || !time || typeof delta !== 'number') return;
+  try {
+    if (typeof updateSlotAvailability === 'function') {
+      await updateSlotAvailability(date, time, delta);
+      return;
+    }
+    const key = 'slotAvailability';
+    const map = JSON.parse(localStorage.getItem(key) || '{}');
+    const id = `${date}@@${time}`;
+    const defaultSlots = 4;
+    map[id] = (typeof map[id] === 'number' ? map[id] : defaultSlots) + delta;
+    if (map[id] < 0) map[id] = 0;
+    localStorage.setItem(key, JSON.stringify(map));
+  } catch (e) {
+    console.warn('adjustSlotCount failed', e);
+  }
+}
+
+// Make selectGroomingCut defensive (prevent form submit)
+function selectGroomingCut(cutName, ev) {
+  try {
+    if (ev) {
+      if (typeof ev.preventDefault === 'function') ev.preventDefault();
+      if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+      if (typeof ev.stopPropagation === 'function') ev.stopPropagation();
+    }
+    const hidden = document.getElementById('preferredCutInput');
+    if (hidden) hidden.value = cutName;
+    const notesEl = document.getElementById('bookingNotes');
+    if (notesEl) {
+      const original = notesEl.value || '';
+      const cleaned = original.split('\n').filter(l => !/^Preferred cut:/i.test(l)).join('\n').trim();
+      notesEl.value = `Preferred cut: ${cutName}` + (cleaned ? '\n' + cleaned : '');
+    }
+    document.querySelectorAll('[data-cut]').forEach(btn => {
+      const match = btn.dataset && btn.dataset.cut === cutName;
+      btn.classList.toggle('selected-cut', match);
+      const parent = btn.closest('div');
+      if (parent) parent.classList.toggle('selected-cut-card', match);
+    });
+    window.selectGroomingCut = selectGroomingCut;
+  } catch (err) { console.warn('selectGroomingCut error', err); }
+}
+window.selectGroomingCut = selectGroomingCut;
+
+// Submit booking: defensive grooming assignment + slot adjustments (replace or merge into your submitBooking)
+async function submitBooking(event) {
+  try {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+
+    // validate last step
+    if (typeof validateStep === 'function' && !validateStep(4)) return;
+
+    // ensure user
+    if (typeof getCurrentUser !== 'function') {
+      alert('Authentication not ready. Please refresh.');
+      return;
+    }
+    const user = await getCurrentUser();
+    if (!user) {
+      alert('Please sign in to submit a booking.');
+      sessionStorage.setItem('bookingData', JSON.stringify(bookingData));
+      sessionStorage.setItem('bookingStep', '4');
+      window.location.href = 'signup.html?return=booking.html';
+      return;
+    }
+
+    // ensure packages loaded
+    await ensurePackagesLoaded();
+
+    // safe groomer assignment
+    let assignedGroomerId = bookingData.groomerId || null;
+    let assignedGroomerName = bookingData.groomerName || 'Assigned on site';
+    if (!assignedGroomerId && typeof assignFairGroomer === 'function') {
+      try {
+        const fair = await assignFairGroomer(bookingData.date, bookingData.time);
+        if (fair) { assignedGroomerId = fair.id; assignedGroomerName = fair.name || assignedGroomerName; }
+      } catch (e) { console.warn('assignFairGroomer failed', e); }
+    }
+
+    // compute cost safely
+    const costDetails = (typeof computeBookingCost === 'function')
+      ? computeBookingCost(bookingData.packageId, bookingData.petWeight, bookingData.addOns, bookingData.singleServices)
+      : { subtotal: 0, totalAmount: 0 };
+
+    // build booking object
+    const booking = {
+      id: generateId ? generateId() : ('bk_' + Date.now()),
+      shortId: (typeof generateBookingCode === 'function') ? generateBookingCode() : undefined,
+      userId: user.id,
+      petName: bookingData.petName || '',
+      petType: bookingData.petType || '',
+      packageName: bookingData.packageId || '',
+      packageId: bookingData.packageId || '',
+      date: bookingData.date,
+      time: bookingData.time,
+      phone: bookingData.contactNumber || '',
+      customerName: bookingData.ownerName || '',
+      groomerId: assignedGroomerId,
+      groomerName: assignedGroomerName,
+      addOns: bookingData.addOns ? bookingData.addOns.slice() : [],
+      bookingNotes: bookingData.bookingNotes || '',
+      singleServices: bookingData.singleServices ? bookingData.singleServices.slice() : [],
+      petWeight: bookingData.petWeight || '',
+      profile: {}, // set as needed
+      status: 'pending',
+      createdAt: Date.now(),
+      cost: costDetails,
+      totalPrice: costDetails?.subtotal || 0
+    };
+
+    // editing path: update and adjust slots if date/time changed
+    const editingId = bookingData.editingBookingId || sessionStorage.getItem('editingBookingId');
+    if (editingId) {
+      booking.id = editingId;
+      // fetch original booking
+      let original = null;
+      if (typeof getBookingById === 'function') original = await getBookingById(editingId);
+      else {
+        const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+        original = all.find(b => b.id === editingId) || null;
+      }
+      // update storage
+      if (typeof updateBooking === 'function') await updateBooking(booking);
+      else {
+        const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+        const idx = all.findIndex(b => b.id === editingId);
+        if (idx >= 0) all[idx] = booking; else all.push(booking);
+        if (typeof saveBookings === 'function') await saveBookings(all);
+        else localStorage.setItem('bookings', JSON.stringify(all));
+      }
+      // adjust slots if date/time changed
+      if (original && (original.date !== booking.date || original.time !== booking.time)) {
+        await adjustSlotCount(original.date, original.time, +1);
+        await adjustSlotCount(booking.date, booking.time, -1);
+      }
+      sessionStorage.removeItem('editingBookingId');
+      sessionStorage.setItem('lastBooking', JSON.stringify(booking));
+      if (typeof redirect === 'function') redirect('booking-success.html'); else window.location.href = 'booking-success.html';
+      return;
+    }
+
+    // create new booking
+    if (typeof createBooking === 'function') await createBooking(booking);
+    else {
+      const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+      all.push(booking);
+      if (typeof saveBookings === 'function') await saveBookings(all);
+      else localStorage.setItem('bookings', JSON.stringify(all));
+    }
+    // decrement slot
+    await adjustSlotCount(booking.date, booking.time, -1);
+    sessionStorage.setItem('lastBooking', JSON.stringify(booking));
+    if (typeof redirect === 'function') redirect('booking-success.html'); else window.location.href = 'booking-success.html';
+  } catch (err) {
+    console.error('submitBooking failed', err);
+    alert('An error occurred while submitting the booking. See console.');
+  }
+}
+window.submitBooking = submitBooking;
+
+// Ensure packages are available before doing summary/validation
+async function ensurePackagesLoaded() {
+  try {
+    if (typeof getPackages === 'function') {
+      const pk = await getPackages();
+      window.packagesList = Array.isArray(pk) ? pk : (window.packagesList || []);
+    } else {
+      window.packagesList = window.packagesList || [];
+    }
+  } catch (e) {
+    console.warn('ensurePackagesLoaded failed', e);
+    window.packagesList = window.packagesList || [];
+  }
+}
+
+// Guarded restoreBookingFormData — define only if missing
+if (typeof window.restoreBookingFormData === 'undefined') {
+  window.restoreBookingFormData = function (data) {
+    try {
+      if (!data) return;
+      const map = {
+        ownerName: 'ownerName',
+        contactNumber: 'contactNumber',
+        ownerAddress: 'ownerAddress',
+        petName: 'petName',
+        petBreed: 'petBreed',
+        petAge: 'petAge',
+        petWeight: 'petWeight',
+        medicalNotes: 'medicalNotes',
+        vaccinationNotes: 'vaccinationNotes',
+        bookingNotes: 'bookingNotes'
+      };
+      Object.keys(map).forEach(k => {
+        try {
+          const el = document.getElementById(map[k]);
+          if (!el || typeof data[k] === 'undefined' || data[k] === null) return;
+          if ('value' in el) el.value = data[k];
+          else el.textContent = data[k];
+        } catch (inner) { /* ignore per-field */ }
+      });
+    } catch (err) { console.warn('restoreBookingFormData failed', err); }
+  };
+}
+
+// Fair groomer assignment: pick the least-loaded groomer for date/time
+async function assignFairGroomer(date, time) {
+  try {
+    const groomers = (typeof getGroomers === 'function') ? await getGroomers() : (window.groomersList || []);
+    if (!Array.isArray(groomers) || groomers.length === 0) return null;
+    const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+    const counts = groomers.map(g => ({
+      groomer: g,
+      count: all.filter(b => b.groomerId === g.id && b.date === date && b.time === time && !/cancelled/i.test(b.status || '')).length
+    }));
+    counts.sort((a, b) => a.count - b.count);
+    return counts[0]?.groomer || null;
+  } catch (e) {
+    console.warn('assignFairGroomer error', e);
+    return null;
+  }
+}
+
+// Adjust slot availability map (fallback localStorage)
+async function adjustSlotCount(date, time, delta) {
+  if (!date || !time || typeof delta !== 'number') return;
+  try {
+    if (typeof updateSlotAvailability === 'function') {
+      await updateSlotAvailability(date, time, delta);
+      return;
+    }
+    const key = 'slotAvailability';
+    const map = JSON.parse(localStorage.getItem(key) || '{}');
+    const id = `${date}@@${time}`;
+    const defaultSlots = 4;
+    map[id] = (typeof map[id] === 'number' ? map[id] : defaultSlots) + delta;
+    if (map[id] < 0) map[id] = 0;
+    localStorage.setItem(key, JSON.stringify(map));
+  } catch (e) {
+    console.warn('adjustSlotCount failed', e);
+  }
+}
+
+// Make selectGroomingCut defensive (prevent form submit)
+function selectGroomingCut(cutName, ev) {
+  try {
+    if (ev) {
+      if (typeof ev.preventDefault === 'function') ev.preventDefault();
+      if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+      if (typeof ev.stopPropagation === 'function') ev.stopPropagation();
+    }
+    const hidden = document.getElementById('preferredCutInput');
+    if (hidden) hidden.value = cutName;
+    const notesEl = document.getElementById('bookingNotes');
+    if (notesEl) {
+      const original = notesEl.value || '';
+      const cleaned = original.split('\n').filter(l => !/^Preferred cut:/i.test(l)).join('\n').trim();
+      notesEl.value = `Preferred cut: ${cutName}` + (cleaned ? '\n' + cleaned : '');
+    }
+    document.querySelectorAll('[data-cut]').forEach(btn => {
+      const match = btn.dataset && btn.dataset.cut === cutName;
+      btn.classList.toggle('selected-cut', match);
+      const parent = btn.closest('div');
+      if (parent) parent.classList.toggle('selected-cut-card', match);
+    });
+    window.selectGroomingCut = selectGroomingCut;
+  } catch (err) { console.warn('selectGroomingCut error', err); }
+}
+window.selectGroomingCut = selectGroomingCut;
+
+// Submit booking: defensive grooming assignment + slot adjustments (replace or merge into your submitBooking)
+async function submitBooking(event) {
+  try {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+
+    // validate last step
+    if (typeof validateStep === 'function' && !validateStep(4)) return;
+
+    // ensure user
+    if (typeof getCurrentUser !== 'function') {
+      alert('Authentication not ready. Please refresh.');
+      return;
+    }
+    const user = await getCurrentUser();
+    if (!user) {
+      alert('Please sign in to submit a booking.');
+      sessionStorage.setItem('bookingData', JSON.stringify(bookingData));
+      sessionStorage.setItem('bookingStep', '4');
+      window.location.href = 'signup.html?return=booking.html';
+      return;
+    }
+
+    // ensure packages loaded
+    await ensurePackagesLoaded();
+
+    // safe groomer assignment
+    let assignedGroomerId = bookingData.groomerId || null;
+    let assignedGroomerName = bookingData.groomerName || 'Assigned on site';
+    if (!assignedGroomerId && typeof assignFairGroomer === 'function') {
+      try {
+        const fair = await assignFairGroomer(bookingData.date, bookingData.time);
+        if (fair) { assignedGroomerId = fair.id; assignedGroomerName = fair.name || assignedGroomerName; }
+      } catch (e) { console.warn('assignFairGroomer failed', e); }
+    }
+
+    // compute cost safely
+    const costDetails = (typeof computeBookingCost === 'function')
+      ? computeBookingCost(bookingData.packageId, bookingData.petWeight, bookingData.addOns, bookingData.singleServices)
+      : { subtotal: 0, totalAmount: 0 };
+
+    // build booking object
+    const booking = {
+      id: generateId ? generateId() : ('bk_' + Date.now()),
+      shortId: (typeof generateBookingCode === 'function') ? generateBookingCode() : undefined,
+      userId: user.id,
+      petName: bookingData.petName || '',
+      petType: bookingData.petType || '',
+      packageName: bookingData.packageId || '',
+      packageId: bookingData.packageId || '',
+      date: bookingData.date,
+      time: bookingData.time,
+      phone: bookingData.contactNumber || '',
+      customerName: bookingData.ownerName || '',
+      groomerId: assignedGroomerId,
+      groomerName: assignedGroomerName,
+      addOns: bookingData.addOns ? bookingData.addOns.slice() : [],
+      bookingNotes: bookingData.bookingNotes || '',
+      singleServices: bookingData.singleServices ? bookingData.singleServices.slice() : [],
+      petWeight: bookingData.petWeight || '',
+      profile: {}, // set as needed
+      status: 'pending',
+      createdAt: Date.now(),
+      cost: costDetails,
+      totalPrice: costDetails?.subtotal || 0
+    };
+
+    // editing path: update and adjust slots if date/time changed
+    const editingId = bookingData.editingBookingId || sessionStorage.getItem('editingBookingId');
+    if (editingId) {
+      booking.id = editingId;
+      // fetch original booking
+      let original = null;
+      if (typeof getBookingById === 'function') original = await getBookingById(editingId);
+      else {
+        const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+        original = all.find(b => b.id === editingId) || null;
+      }
+      // update storage
+      if (typeof updateBooking === 'function') await updateBooking(booking);
+      else {
+        const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+        const idx = all.findIndex(b => b.id === editingId);
+        if (idx >= 0) all[idx] = booking; else all.push(booking);
+        if (typeof saveBookings === 'function') await saveBookings(all);
+        else localStorage.setItem('bookings', JSON.stringify(all));
+      }
+      // adjust slots if date/time changed
+      if (original && (original.date !== booking.date || original.time !== booking.time)) {
+        await adjustSlotCount(original.date, original.time, +1);
+        await adjustSlotCount(booking.date, booking.time, -1);
+      }
+      sessionStorage.removeItem('editingBookingId');
+      sessionStorage.setItem('lastBooking', JSON.stringify(booking));
+      if (typeof redirect === 'function') redirect('booking-success.html'); else window.location.href = 'booking-success.html';
+      return;
+    }
+
+    // create new booking
+    if (typeof createBooking === 'function') await createBooking(booking);
+    else {
+      const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+      all.push(booking);
+      if (typeof saveBookings === 'function') await saveBookings(all);
+      else localStorage.setItem('bookings', JSON.stringify(all));
+    }
+    // decrement slot
+    await adjustSlotCount(booking.date, booking.time, -1);
+    sessionStorage.setItem('lastBooking', JSON.stringify(booking));
+    if (typeof redirect === 'function') redirect('booking-success.html'); else window.location.href = 'booking-success.html';
+  } catch (err) {
+    console.error('submitBooking failed', err);
+    alert('An error occurred while submitting the booking. See console.');
+  }
+}
+window.submitBooking = submitBooking;
+
+// Ensure packages are available before doing summary/validation
+async function ensurePackagesLoaded() {
+  try {
+    if (typeof getPackages === 'function') {
+      const pk = await getPackages();
+      window.packagesList = Array.isArray(pk) ? pk : (window.packagesList || []);
+    } else {
+      window.packagesList = window.packagesList || [];
+    }
+  } catch (e) {
+    console.warn('ensurePackagesLoaded failed', e);
+    window.packagesList = window.packagesList || [];
+  }
+}
+
+// Guarded restoreBookingFormData — define only if missing
+if (typeof window.restoreBookingFormData === 'undefined') {
+  window.restoreBookingFormData = function (data) {
+    try {
+      if (!data) return;
+      const map = {
+        ownerName: 'ownerName',
+        contactNumber: 'contactNumber',
+        ownerAddress: 'ownerAddress',
+        petName: 'petName',
+        petBreed: 'petBreed',
+        petAge: 'petAge',
+        petWeight: 'petWeight',
+        medicalNotes: 'medicalNotes',
+        vaccinationNotes: 'vaccinationNotes',
+        bookingNotes: 'bookingNotes'
+      };
+      Object.keys(map).forEach(k => {
+        try {
+          const el = document.getElementById(map[k]);
+          if (!el || typeof data[k] === 'undefined' || data[k] === null) return;
+          if ('value' in el) el.value = data[k];
+          else el.textContent = data[k];
+        } catch (inner) { /* ignore per-field */ }
+      });
+    } catch (err) { console.warn('restoreBookingFormData failed', err); }
+  };
+}
+
+// Fair groomer assignment: pick the least-loaded groomer for date/time
+async function assignFairGroomer(date, time) {
+  try {
+    const groomers = (typeof getGroomers === 'function') ? await getGroomers() : (window.groomersList || []);
+    if (!Array.isArray(groomers) || groomers.length === 0) return null;
+    const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+    const counts = groomers.map(g => ({
+      groomer: g,
+      count: all.filter(b => b.groomerId === g.id && b.date === date && b.time === time && !/cancelled/i.test(b.status || '')).length
+    }));
+    counts.sort((a, b) => a.count - b.count);
+    return counts[0]?.groomer || null;
+  } catch (e) {
+    console.warn('assignFairGroomer error', e);
+    return null;
+  }
+}
+
+// Adjust slot availability map (fallback localStorage)
+async function adjustSlotCount(date, time, delta) {
+  if (!date || !time || typeof delta !== 'number') return;
+  try {
+    if (typeof updateSlotAvailability === 'function') {
+      await updateSlotAvailability(date, time, delta);
+      return;
+    }
+    const key = 'slotAvailability';
+    const map = JSON.parse(localStorage.getItem(key) || '{}');
+    const id = `${date}@@${time}`;
+    const defaultSlots = 4;
+    map[id] = (typeof map[id] === 'number' ? map[id] : defaultSlots) + delta;
+    if (map[id] < 0) map[id] = 0;
+    localStorage.setItem(key, JSON.stringify(map));
+  } catch (e) {
+    console.warn('adjustSlotCount failed', e);
+  }
+}
+
+// Make selectGroomingCut defensive (prevent form submit)
+function selectGroomingCut(cutName, ev) {
+  try {
+    if (ev) {
+      if (typeof ev.preventDefault === 'function') ev.preventDefault();
+      if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+      if (typeof ev.stopPropagation === 'function') ev.stopPropagation();
+    }
+    const hidden = document.getElementById('preferredCutInput');
+    if (hidden) hidden.value = cutName;
+    const notesEl = document.getElementById('bookingNotes');
+    if (notesEl) {
+      const original = notesEl.value || '';
+      const cleaned = original.split('\n').filter(l => !/^Preferred cut:/i.test(l)).join('\n').trim();
+      notesEl.value = `Preferred cut: ${cutName}` + (cleaned ? '\n' + cleaned : '');
+    }
+    document.querySelectorAll('[data-cut]').forEach(btn => {
+      const match = btn.dataset && btn.dataset.cut === cutName;
+      btn.classList.toggle('selected-cut', match);
+      const parent = btn.closest('div');
+      if (parent) parent.classList.toggle('selected-cut-card', match);
+    });
+    window.selectGroomingCut = selectGroomingCut;
+  } catch (err) { console.warn('selectGroomingCut error', err); }
+}
+window.selectGroomingCut = selectGroomingCut;
+
+// Submit booking: defensive grooming assignment + slot adjustments (replace or merge into your submitBooking)
+async function submitBooking(event) {
+  try {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+
+    // validate last step
+    if (typeof validateStep === 'function' && !validateStep(4)) return;
+
+    // ensure user
+    if (typeof getCurrentUser !== 'function') {
+      alert('Authentication not ready. Please refresh.');
+      return;
+    }
+    const user = await getCurrentUser();
+    if (!user) {
+      alert('Please sign in to submit a booking.');
+      sessionStorage.setItem('bookingData', JSON.stringify(bookingData));
+      sessionStorage.setItem('bookingStep', '4');
+      window.location.href = 'signup.html?return=booking.html';
+      return;
+    }
+
+    // ensure packages loaded
+    await ensurePackagesLoaded();
+
+    // safe groomer assignment
+    let assignedGroomerId = bookingData.groomerId || null;
+    let assignedGroomerName = bookingData.groomerName || 'Assigned on site';
+    if (!assignedGroomerId && typeof assignFairGroomer === 'function') {
+      try {
+        const fair = await assignFairGroomer(bookingData.date, bookingData.time);
+        if (fair) { assignedGroomerId = fair.id; assignedGroomerName = fair.name || assignedGroomerName; }
+      } catch (e) { console.warn('assignFairGroomer failed', e); }
+    }
+
+    // compute cost safely
+    const costDetails = (typeof computeBookingCost === 'function')
+      ? computeBookingCost(bookingData.packageId, bookingData.petWeight, bookingData.addOns, bookingData.singleServices)
+      : { subtotal: 0, totalAmount: 0 };
+
+    // build booking object
+    const booking = {
+      id: generateId ? generateId() : ('bk_' + Date.now()),
+      shortId: (typeof generateBookingCode === 'function') ? generateBookingCode() : undefined,
+      userId: user.id,
+      petName: bookingData.petName || '',
+      petType: bookingData.petType || '',
+      packageName: bookingData.packageId || '',
+      packageId: bookingData.packageId || '',
+      date: bookingData.date,
+      time: bookingData.time,
+      phone: bookingData.contactNumber || '',
+      customerName: bookingData.ownerName || '',
+      groomerId: assignedGroomerId,
+      groomerName: assignedGroomerName,
+      addOns: bookingData.addOns ? bookingData.addOns.slice() : [],
+      bookingNotes: bookingData.bookingNotes || '',
+      singleServices: bookingData.singleServices ? bookingData.singleServices.slice() : [],
+      petWeight: bookingData.petWeight || '',
+      profile: {}, // set as needed
+      status: 'pending',
+      createdAt: Date.now(),
+      cost: costDetails,
+      totalPrice: costDetails?.subtotal || 0
+    };
+
+    // editing path: update and adjust slots if date/time changed
+    const editingId = bookingData.editingBookingId || sessionStorage.getItem('editingBookingId');
+    if (editingId) {
+      booking.id = editingId;
+      // fetch original booking
+      let original = null;
+      if (typeof getBookingById === 'function') original = await getBookingById(editingId);
+      else {
+        const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+        original = all.find(b => b.id === editingId) || null;
+      }
+      // update storage
+      if (typeof updateBooking === 'function') await updateBooking(booking);
+      else {
+        const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+        const idx = all.findIndex(b => b.id === editingId);
+        if (idx >= 0) all[idx] = booking; else all.push(booking);
+        if (typeof saveBookings === 'function') await saveBookings(all);
+        else localStorage.setItem('bookings', JSON.stringify(all));
+      }
+      // adjust slots if date/time changed
+      if (original && (original.date !== booking.date || original.time !== booking.time)) {
+        await adjustSlotCount(original.date, original.time, +1);
+        await adjustSlotCount(booking.date, booking.time, -1);
+      }
+      sessionStorage.removeItem('editingBookingId');
+      sessionStorage.setItem('lastBooking', JSON.stringify(booking));
+      if (typeof redirect === 'function') redirect('booking-success.html'); else window.location.href = 'booking-success.html';
+      return;
+    }
+
+    // create new booking
+    if (typeof createBooking === 'function') await createBooking(booking);
+    else {
+      const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+      all.push(booking);
+      if (typeof saveBookings === 'function') await saveBookings(all);
+      else localStorage.setItem('bookings', JSON.stringify(all));
+    }
+    // decrement slot
+    await adjustSlotCount(booking.date, booking.time, -1);
+    sessionStorage.setItem('lastBooking', JSON.stringify(booking));
+    if (typeof redirect === 'function') redirect('booking-success.html'); else window.location.href = 'booking-success.html';
+  } catch (err) {
+    console.error('submitBooking failed', err);
+    alert('An error occurred while submitting the booking. See console.');
+  }
+}
+window.submitBooking = submitBooking;
+
+// Ensure packages are available before doing summary/validation
+async function ensurePackagesLoaded() {
+  try {
+    if (typeof getPackages === 'function') {
+      const pk = await getPackages();
+      window.packagesList = Array.isArray(pk) ? pk : (window.packagesList || []);
+    } else {
+      window.packagesList = window.packagesList || [];
+    }
+  } catch (e) {
+    console.warn('ensurePackagesLoaded failed', e);
+    window.packagesList = window.packagesList || [];
+  }
+}
+
+// Guarded restoreBookingFormData — define only if missing
+if (typeof window.restoreBookingFormData === 'undefined') {
+  window.restoreBookingFormData = function (data) {
+    try {
+      if (!data) return;
+      const map = {
+        ownerName: 'ownerName',
+        contactNumber: 'contactNumber',
+        ownerAddress: 'ownerAddress',
+        petName: 'petName',
+        petBreed: 'petBreed',
+        petAge: 'petAge',
+        petWeight: 'petWeight',
+        medicalNotes: 'medicalNotes',
+        vaccinationNotes: 'vaccinationNotes',
+        bookingNotes: 'bookingNotes'
+      };
+      Object.keys(map).forEach(k => {
+        try {
+          const el = document.getElementById(map[k]);
+          if (!el || typeof data[k] === 'undefined' || data[k] === null) return;
+          if ('value' in el) el.value = data[k];
+          else el.textContent = data[k];
+        } catch (inner) { /* ignore per-field */ }
+      });
+    } catch (err) { console.warn('restoreBookingFormData failed', err); }
+  };
+}
+
+// Fair groomer assignment: pick the least-loaded groomer for date/time
+async function assignFairGroomer(date, time) {
+  try {
+    const groomers = (typeof getGroomers === 'function') ? await getGroomers() : (window.groomersList || []);
+    if (!Array.isArray(groomers) || groomers.length === 0) return null;
+    const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+    const counts = groomers.map(g => ({
+      groomer: g,
+      count: all.filter(b => b.groomerId === g.id && b.date === date && b.time === time && !/cancelled/i.test(b.status || '')).length
+    }));
+    counts.sort((a, b) => a.count - b.count);
+    return counts[0]?.groomer || null;
+  } catch (e) {
+    console.warn('assignFairGroomer error', e);
+    return null;
+  }
+}
+
+// Adjust slot availability map (fallback localStorage)
+async function adjustSlotCount(date, time, delta) {
+  if (!date || !time || typeof delta !== 'number') return;
+  try {
+    if (typeof updateSlotAvailability === 'function') {
+      await updateSlotAvailability(date, time, delta);
+      return;
+    }
+    const key = 'slotAvailability';
+    const map = JSON.parse(localStorage.getItem(key) || '{}');
+    const id = `${date}@@${time}`;
+    const defaultSlots = 4;
+    map[id] = (typeof map[id] === 'number' ? map[id] : defaultSlots) + delta;
+    if (map[id] < 0) map[id] = 0;
+    localStorage.setItem(key, JSON.stringify(map));
+  } catch (e) {
+    console.warn('adjustSlotCount failed', e);
+  }
+}
+
+// Make selectGroomingCut defensive (prevent form submit)
+function selectGroomingCut(cutName, ev) {
+  try {
+    if (ev) {
+      if (typeof ev.preventDefault === 'function') ev.preventDefault();
+      if (typeof ev.stopImmediatePropagation === 'function') ev.stopImmediatePropagation();
+      if (typeof ev.stopPropagation === 'function') ev.stopPropagation();
+    }
+    const hidden = document.getElementById('preferredCutInput');
+    if (hidden) hidden.value = cutName;
+    const notesEl = document.getElementById('bookingNotes');
+    if (notesEl) {
+      const original = notesEl.value || '';
+      const cleaned = original.split('\n').filter(l => !/^Preferred cut:/i.test(l)).join('\n').trim();
+      notesEl.value = `Preferred cut: ${cutName}` + (cleaned ? '\n' + cleaned : '');
+    }
+    document.querySelectorAll('[data-cut]').forEach(btn => {
+      const match = btn.dataset && btn.dataset.cut === cutName;
+      btn.classList.toggle('selected-cut', match);
+      const parent = btn.closest('div');
+      if (parent) parent.classList.toggle('selected-cut-card', match);
+    });
+    window.selectGroomingCut = selectGroomingCut;
+  } catch (err) { console.warn('selectGroomingCut error', err); }
+}
+window.selectGroomingCut = selectGroomingCut;
+
+// Submit booking: defensive grooming assignment + slot adjustments (replace or merge into your submitBooking)
+async function submitBooking(event) {
+  try {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+
+    // validate last step
+    if (typeof validateStep === 'function' && !validateStep(4)) return;
+
+    // ensure user
+    if (typeof getCurrentUser !== 'function') {
+      alert('Authentication not ready. Please refresh.');
+      return;
+    }
+    const user = await getCurrentUser();
+    if (!user) {
+      alert('Please sign in to submit a booking.');
+      sessionStorage.setItem('bookingData', JSON.stringify(bookingData));
+      sessionStorage.setItem('bookingStep', '4');
+      window.location.href = 'signup.html?return=booking.html';
+      return;
+    }
+
+    // ensure packages loaded
+    await ensurePackagesLoaded();
+
+    // safe groomer assignment
+    let assignedGroomerId = bookingData.groomerId || null;
+    let assignedGroomerName = bookingData.groomerName || 'Assigned on site';
+    if (!assignedGroomerId && typeof assignFairGroomer === 'function') {
+      try {
+        const fair = await assignFairGroomer(bookingData.date, bookingData.time);
+        if (fair) { assignedGroomerId = fair.id; assignedGroomerName = fair.name || assignedGroomerName; }
+      } catch (e) { console.warn('assignFairGroomer failed', e); }
+    }
+
+    // compute cost safely
+    const costDetails = (typeof computeBookingCost === 'function')
+      ? computeBookingCost(bookingData.packageId, bookingData.petWeight, bookingData.addOns, bookingData.singleServices)
+      : { subtotal: 0, totalAmount: 0 };
+
+    // build booking object
+    const booking = {
+      id: generateId ? generateId() : ('bk_' + Date.now()),
+      shortId: (typeof generateBookingCode === 'function') ? generateBookingCode() : undefined,
+      userId: user.id,
+      petName: bookingData.petName || '',
+      petType: bookingData.petType || '',
+      packageName: bookingData.packageId || '',
+      packageId: bookingData.packageId || '',
+      date: bookingData.date,
+      time: bookingData.time,
+      phone: bookingData.contactNumber || '',
+      customerName: bookingData.ownerName || '',
+      groomerId: assignedGroomerId,
+      groomerName: assignedGroomerName,
+      addOns: bookingData.addOns ? bookingData.addOns.slice() : [],
+      bookingNotes: bookingData.bookingNotes || '',
+      singleServices: bookingData.singleServices ? bookingData.singleServices.slice() : [],
+      petWeight: bookingData.petWeight || '',
+      profile: {}, // set as needed
+      status: 'pending',
+      createdAt: Date.now(),
+      cost: costDetails,
+      totalPrice: costDetails?.subtotal || 0
+    };
+
+    // editing path: update and adjust slots if date/time changed
+    const editingId = bookingData.editingBookingId || sessionStorage.getItem('editingBookingId');
+    if (editingId) {
+      booking.id = editingId;
+      // fetch original booking
+      let original = null;
+      if (typeof getBookingById === 'function') original = await getBookingById(editingId);
+      else {
+        const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+        original = all.find(b => b.id === editingId) || null;
+      }
+      // update storage
+      if (typeof updateBooking === 'function') await updateBooking(booking);
+      else {
+        const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+        const idx = all.findIndex(b => b.id === editingId);
+        if (idx >= 0) all[idx] = booking; else all.push(booking);
+        if (typeof saveBookings === 'function') await saveBookings(all);
+        else localStorage.setItem('bookings', JSON.stringify(all));
+      }
+      // adjust slots if date/time changed
+      if (original && (original.date !== booking.date || original.time !== booking.time)) {
+        await adjustSlotCount(original.date, original.time, +1);
+        await adjustSlotCount(booking.date, booking.time, -1);
+      }
+      sessionStorage.removeItem('editingBookingId');
+      sessionStorage.setItem('lastBooking', JSON.stringify(booking));
+      if (typeof redirect === 'function') redirect('booking-success.html'); else window.location.href = 'booking-success.html';
+      return;
+    }
+
+    // create new booking
+    if (typeof createBooking === 'function') await createBooking(booking);
+    else {
+      const all = (typeof getBookings === 'function') ? await getBookings() : JSON.parse(localStorage.getItem('bookings') || '[]');
+      all.push(booking);
+      if (typeof saveBookings === 'function') await saveBookings(all);
+      else localStorage.setItem('bookings', JSON.stringify(all));
+    }
+    // decrement slot
+    await adjustSlotCount(booking.date, booking.time, -1);
+    sessionStorage.setItem('lastBooking', JSON.stringify(booking));
+    if (typeof redirect === 'function') redirect('booking-success.html'); else window.location.href = 'booking-success.html';
+  } catch (err) {
+    console.error('submitBooking failed', err);
+    alert('An error occurred while submitting the booking. See console.');
+  }
+}
+window.submitBooking = submitBooking;
